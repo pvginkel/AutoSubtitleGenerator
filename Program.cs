@@ -83,6 +83,12 @@ foreach (var videoFileName in videoFileNames)
         Log.Error("Cancelled.");
         return 1;
     }
+    catch (InvalidOperationException exception)
+    {
+        // Set-up problems and engine failures, with their own explanation.
+        Log.Error(exception.Message);
+        failed.Add(videoFileName);
+    }
     catch (Exception exception)
     {
         Log.Error(exception.ToString());
@@ -93,8 +99,10 @@ foreach (var videoFileName in videoFileNames)
 Console.WriteLine();
 if (failed.Count > 0)
 {
-    Log.Error($"Failed ({failed.Count} of {videoFileNames.Count}):");
-    failed.ForEach(f => Log.Error("  " + f));
+    Console.ForegroundColor = ConsoleColor.Red;
+    Console.WriteLine($"Failed ({failed.Count} of {videoFileNames.Count}):");
+    failed.ForEach(f => Console.WriteLine("  " + f));
+    Console.ResetColor();
     return 1;
 }
 
