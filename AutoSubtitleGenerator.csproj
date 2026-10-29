@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Headless runner for Subtitle Edit's "Speech to text", "Improve time codes" and
+    "Auto-translate". It references Subtitle Edit's own projects so the same code does the
+    work as in the GUI. build.ps1 checks out the Subtitle Edit source (at the tag of the
+    installed version) into the subtitleedit folder.
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <SeSourceDir Condition="'$(SeSourceDir)' == ''">$(MSBuildThisFileDirectory)subtitleedit\</SeSourceDir>
+    <!-- The Subtitle Edit checkout has its own source files; keep them out of this project. -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);subtitleedit\**</DefaultItemExcludes>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="$(SeSourceDir)src\ui\UI.csproj" />
+    <ProjectReference Include="$(SeSourceDir)src\libse\LibSE.csproj" />
+    <ProjectReference Include="$(SeSourceDir)src\libuilogic\LibUiLogic.csproj" />
+  </ItemGroup>
+
+</Project>
