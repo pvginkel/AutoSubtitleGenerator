@@ -7,51 +7,74 @@ namespace AutoSubtitleGenerator;
 
 internal static class Log
 {
+    /// <summary>Translation runs several requests at once, and each of them may log.</summary>
+    private static readonly Lock Gate = new();
+
     private static bool _inProgress;
 
     public static void Step(string text)
     {
-        EndProgress();
-        Console.ForegroundColor = ConsoleColor.Yellow;
-        Console.WriteLine(text);
-        Console.ResetColor();
+        lock (Gate)
+        {
+            EndProgressLocked();
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine(text);
+            Console.ResetColor();
+        }
     }
 
     public static void Info(string text)
     {
-        EndProgress();
-        Console.WriteLine("  " + text);
+        lock (Gate)
+        {
+            EndProgressLocked();
+            Console.WriteLine("  " + text);
+        }
     }
 
     public static void Error(string text)
     {
-        EndProgress();
-        Console.ForegroundColor = ConsoleColor.Red;
-        Console.Error.WriteLine("  " + text);
-        Console.ResetColor();
+        lock (Gate)
+        {
+            EndProgressLocked();
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.Error.WriteLine("  " + text);
+            Console.ResetColor();
+        }
     }
 
     /// <summary>A status line that the next one overwrites.</summary>
     public static void Progress(string text)
     {
-        var width = Console.IsOutputRedirected ? 0 : Math.Max(0, Console.WindowWidth - 1);
-        var line = ("  " + text).PadRight(width);
-        if (width > 0 && line.Length > width)
+        lock (Gate)
         {
-            line = line[..width];
-        }
+            var width = Console.IsOutputRedirected ? 0 : Math.Max(0, Console.WindowWidth - 1);
+            var line = ("  " + text).PadRight(width);
+            if (width > 0 && line.Length > width)
+            {
+                line = line[..width];
+            }
 
-        if (Console.IsOutputRedirected)
-        {
-            Console.WriteLine(line);
-            return;
-        }
+            if (Console.IsOutputRedirected)
+            {
+                Console.WriteLine(line);
+                return;
+            }
 
-        Console.Write("\r" + line);
-        _inProgress = true;
+            Console.Write("\r" + line);
+            _inProgress = true;
+        }
     }
 
     public static void EndProgress()
+    {
+        lock (Gate)
+        {
+            EndProgressLocked();
+        }
+    }
+
+    private static void EndProgressLocked()
     {
         if (_inProgress)
         {

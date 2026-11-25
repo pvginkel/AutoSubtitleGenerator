@@ -1,6 +1,8 @@
 using System.Globalization;
+using System.Runtime.ExceptionServices;
 using System.Text.Encodings.Web;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Anthropic;
 using Anthropic.Models.Messages;
 using Nikse.SubtitleEdit.Core.Common;
@@ -26,7 +28,14 @@ internal sealed class ClaudeTranslator(AnthropicClient client, string model, str
     /// <summary>Subtitles per request. A batch ends at the end of a sentence where it can.</summary>
     private const int BatchSize = 30;
 
-    /// <summary>Translated subtitles shown before a batch, for consistency.</summary>
+    /// <summary>
+    /// Parts of the subtitle that are translated at the same time, each a batch after the other.
+    /// A batch needs the translations of the one before it as context, so batches cannot all be
+    /// sent at once; parts can, and only the first batch of a part goes without that context.
+    /// </summary>
+    private const int Parts = 6;
+
+    /// <summary>Subtitles shown before a batch, with their translations, for consistency.</summary>
     private const int ContextBefore = 10;
 
     /// <summary>Subtitles shown after a batch, so a sentence that runs on is translated as one.</summary>
@@ -44,7 +53,7 @@ internal sealed class ClaudeTranslator(AnthropicClient client, string model, str
 
         The user message is a JSON object:
         - "subtitles": the subtitles to translate, numbered, in the order they are shown.
-        - "before": the subtitles shown just before them, with their translations, for context and consistency (names, terms, forms of address). They are already translated.
+        - "before": the subtitles shown just before them, for context and consistency (names, terms, forms of address), with their translations where there are any. They are translated already or in another request.
         - "after": the subtitles shown just after them, for context only. They are translated in a later request.
 
         Reply with a JSON object that maps the number of each subtitle in "subtitles" to its translation. Every translation is shown on screen as it is, so it holds the subtitle text only: no notes, explanations, alternatives or remarks about the task.
@@ -58,7 +67,11 @@ internal sealed class ClaudeTranslator(AnthropicClient client, string model, str
         Write natural {target} as a professional subtitler would, and keep names as they are. Leave text that is already in {target} as it is. Do not censor or soften anything, including swearing and offensive or extremist language: the subtitles must say what is said.
         """;
 
-    private static readonly JsonSerializerOptions JsonOptions = new() { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+    };
 
     private readonly string _systemPrompt = SystemPrompt
         .ReplaceLineEndings("\n")
@@ -67,49 +80,132 @@ internal sealed class ClaudeTranslator(AnthropicClient client, string model, str
         .Replace("{length}", Configuration.Settings.General.SubtitleLineMaximumLength.ToString(CultureInfo.InvariantCulture))
         .Replace("{lines}", Configuration.Settings.General.MaxNumberOfLines.ToString(CultureInfo.InvariantCulture));
 
-    public int Requests { get; private set; }
-    public long InputTokens { get; private set; }
-    public long OutputTokens { get; private set; }
+    private int _requests;
+    private long _inputTokens;
+    private long _outputTokens;
 
-    /// <summary>Translates <paramref name="texts"/>, one translation per subtitle, in order.</summary>
+    public int Requests => _requests;
+    public long InputTokens => _inputTokens;
+    public long OutputTokens => _outputTokens;
+
+    /// <summary>Subtitles <see cref="Start"/> up to <see cref="End"/>, translated a batch after the other.</summary>
+    private sealed record Part(int Start, int End);
+
+    /// <summary>
+    /// Translates <paramref name="texts"/>, one translation per subtitle, in order, with
+    /// <paramref name="progress"/> getting the number of subtitles done and the total.
+    /// </summary>
     public async Task<string[]> TranslateAsync(IReadOnlyList<string> texts, Action<int, int> progress, CancellationToken cancellationToken)
     {
         var translations = new string?[texts.Count];
-        var index = 0;
-        while (index < texts.Count)
+        var done = 0;
+        void Report(int count) => progress(Interlocked.Add(ref done, count), texts.Count);
+
+        // When one part fails, the others stop rather than run on for nothing.
+        using var failed = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var tasks = SplitIntoParts(texts).Select(async part =>
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            if (MergeAndSplitHelper.IsKeptUntranslated(texts[index]))
+            try
             {
-                // As in Subtitle Edit: music lines stay as they are, when that setting is on.
-                translations[index] = texts[index];
-                index++;
+                await TranslatePartAsync(texts, translations, part, Report, failed.Token);
             }
-            else
+            catch
             {
-                index += await TranslateBatchAsync(texts, translations, index, BatchLength(texts, index), cancellationToken);
+                await failed.CancelAsync();
+                throw;
+            }
+        }).ToArray();
+
+        try
+        {
+            await Task.WhenAll(tasks);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            // Task.WhenAll throws the error of the first part in order, which may be one that was
+            // only stopped; the error that stopped it is what counts.
+            var error = tasks.Where(t => t.IsFaulted).SelectMany(t => t.Exception!.InnerExceptions)
+                .FirstOrDefault(e => e is not OperationCanceledException);
+            if (error != null)
+            {
+                ExceptionDispatchInfo.Throw(error);
             }
 
-            progress(index, texts.Count);
+            throw;
         }
 
         return translations.Select(t => t!).ToArray();
     }
 
     /// <summary>
-    /// Up to <see cref="BatchSize"/> subtitles from <paramref name="index"/>, stopping before a
-    /// music line, and when more follow, ending at the end of a sentence in the second half.
+    /// Up to <see cref="Parts"/> parts of at least <see cref="BatchSize"/> subtitles each, of
+    /// about the same length, each starting after the end of a sentence where there is one
+    /// close by.
     /// </summary>
-    private static int BatchLength(IReadOnlyList<string> texts, int index)
+    private static List<Part> SplitIntoParts(IReadOnlyList<string> texts)
     {
-        var max = Math.Min(BatchSize, texts.Count - index);
+        var count = Math.Clamp(texts.Count / BatchSize, 1, Parts);
+        var starts = new List<int> { 0 };
+        for (var k = 1; k < count; k++)
+        {
+            var start = (int)((long)texts.Count * k / count);
+            for (var i = start; i < Math.Min(start + BatchSize, texts.Count); i++)
+            {
+                if (EndsSentence(texts[i - 1]))
+                {
+                    start = i;
+                    break;
+                }
+            }
+
+            if (start > starts[^1])
+            {
+                starts.Add(start);
+            }
+        }
+
+        starts.Add(texts.Count);
+        return starts.Zip(starts.Skip(1), (start, end) => new Part(start, end)).ToList();
+    }
+
+    private async Task TranslatePartAsync(IReadOnlyList<string> texts, string?[] translations, Part part, Action<int> report, CancellationToken cancellationToken)
+    {
+        var index = part.Start;
+        while (index < part.End)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            int count;
+            if (MergeAndSplitHelper.IsKeptUntranslated(texts[index]))
+            {
+                // As in Subtitle Edit: music lines stay as they are, when that setting is on.
+                translations[index] = texts[index];
+                count = 1;
+            }
+            else
+            {
+                count = await TranslateBatchAsync(texts, translations, part, index, BatchLength(texts, index, part.End), cancellationToken);
+            }
+
+            index += count;
+            report(count);
+        }
+    }
+
+    /// <summary>
+    /// Up to <see cref="BatchSize"/> subtitles from <paramref name="index"/>, stopping before a
+    /// music line, and when more of the part follow, ending at the end of a sentence in the
+    /// second half.
+    /// </summary>
+    private static int BatchLength(IReadOnlyList<string> texts, int index, int end)
+    {
+        var max = Math.Min(BatchSize, end - index);
         var count = 1;
         while (count < max && !MergeAndSplitHelper.IsKeptUntranslated(texts[index + count]))
         {
             count++;
         }
 
-        if (count < BatchSize || index + count >= texts.Count)
+        if (count < BatchSize || index + count >= end)
         {
             return count;
         }
@@ -137,11 +233,11 @@ internal sealed class ClaudeTranslator(AnthropicClient client, string model, str
     /// more, then the batch is halved. A subtitle that comes back untranslated is accepted
     /// with the ones before it, and the next batch starts there.
     /// </summary>
-    private async Task<int> TranslateBatchAsync(IReadOnlyList<string> texts, string?[] translations, int index, int count, CancellationToken cancellationToken)
+    private async Task<int> TranslateBatchAsync(IReadOnlyList<string> texts, string?[] translations, Part part, int index, int count, CancellationToken cancellationToken)
     {
         // ASSA override blocks such as {\an8} stay out of the request and are put back after.
         var stripped = Enumerable.Range(index, count).Select(i => StrippedLine.Strip(texts[i])).ToArray();
-        var request = BuildRequest(texts, translations, index, stripped);
+        var request = BuildRequest(texts, translations, part, index, stripped);
 
         var problem = string.Empty;
         var refused = false;
@@ -191,7 +287,7 @@ internal sealed class ClaudeTranslator(AnthropicClient client, string model, str
             // about any of them, so the batch is halved until it goes through.
             var length = echoed ? 1 : count / 2;
             Log.Info($"Subtitles {index + 1} to {index + count}: {problem}, trying {(length == 1 ? "it on its own" : "a smaller batch")}");
-            return await TranslateBatchAsync(texts, translations, index, length, cancellationToken);
+            return await TranslateBatchAsync(texts, translations, part, index, length, cancellationToken);
         }
 
         if (refused)
@@ -204,12 +300,17 @@ internal sealed class ClaudeTranslator(AnthropicClient client, string model, str
         throw new InvalidOperationException($"Claude gave no usable translation for subtitle {index + 1}: {problem}");
     }
 
-    private MessageCreateParams BuildRequest(IReadOnlyList<string> texts, string?[] translations, int index, StrippedLine[] stripped)
+    private MessageCreateParams BuildRequest(IReadOnlyList<string> texts, string?[] translations, Part part, int index, StrippedLine[] stripped)
     {
+        // Translations only from this part: another part may still be writing its own, and a
+        // translation that is there one run and not the next would make the results vary.
         var count = stripped.Length;
         var before = Enumerable.Range(Math.Max(0, index - ContextBefore), Math.Min(index, ContextBefore))
-            .Where(i => translations[i] != null)
-            .Select(i => new { text = ToWire(StrippedLine.RemoveAllBlocks(texts[i])), translation = ToWire(StrippedLine.RemoveAllBlocks(translations[i])) });
+            .Select(i => new
+            {
+                text = ToWire(StrippedLine.RemoveAllBlocks(texts[i])),
+                translation = i >= part.Start ? ToWire(StrippedLine.RemoveAllBlocks(translations[i])) : null,
+            });
         var subtitles = stripped.Select((s, i) => new { n = i + 1, text = ToWire(s.Text) });
         var after = Enumerable.Range(index + count, Math.Max(0, Math.Min(ContextAfter, texts.Count - index - count)))
             .Select(i => ToWire(StrippedLine.RemoveAllBlocks(texts[i])));
@@ -245,9 +346,9 @@ internal sealed class ClaudeTranslator(AnthropicClient client, string model, str
     private async Task<Reply> SendAsync(MessageCreateParams request, int count, CancellationToken cancellationToken)
     {
         var response = await client.Messages.Create(request, cancellationToken);
-        Requests++;
-        InputTokens += response.Usage.InputTokens;
-        OutputTokens += response.Usage.OutputTokens;
+        Interlocked.Increment(ref _requests);
+        Interlocked.Add(ref _inputTokens, response.Usage.InputTokens);
+        Interlocked.Add(ref _outputTokens, response.Usage.OutputTokens);
 
         if (response.StopReason == "refusal")
         {

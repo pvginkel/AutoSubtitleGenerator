@@ -29,8 +29,10 @@ Translation is the exception. Subtitle Edit's Anthropic engine sends its prompt 
 one message and takes the whole reply as the translation, so when Claude corrected itself in the
 reply ("Wait, I need to correct the first line"), that ended up in the subtitles. This app calls
 Claude itself (`ClaudeTranslator.cs`): it sends the subtitles in numbered batches of up to 30, with
-the ones just before and after as context, and a JSON schema holds the reply to one translation
-per subtitle. A subtitle that comes back untranslated is asked for again; one that Claude refuses
+the ones just before (and their translations) and after as context, and a JSON schema holds the
+reply to one translation per subtitle. The subtitles are split into up to 6 parts that are
+translated at the same time, each a batch after the other; only the first batch of a part goes
+without earlier translations as context. A subtitle that comes back untranslated is asked for again; one that Claude refuses
 to translate is kept in the original language, with an error in the output. A subtitle with a
 line over the maximum line length (Options > Settings > Rules) is broken again as the "Auto br"
 button does it.
