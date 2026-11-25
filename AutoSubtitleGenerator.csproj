@@ -23,4 +23,8 @@
     <ProjectReference Include="$(SeSourceDir)src\libuilogic\LibUiLogic.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <PackageReference Include="Anthropic" Version="13.14.0" />
+  </ItemGroup>
+
 </Project>

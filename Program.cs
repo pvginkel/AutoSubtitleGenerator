@@ -20,9 +20,9 @@ if (args.Length == 0)
     Console.Error.WriteLine();
     Console.Error.WriteLine("For every video: speech to text (<video>.de.srt), improve time codes");
     Console.Error.WriteLine("(<video> (aligned).de.srt) and translation with Claude (<video>.nl.srt),");
-    Console.Error.WriteLine("using the Subtitle Edit settings. A video with <video>.en.vtt or .de.vtt");
-    Console.Error.WriteLine("next to it has that translated instead. A step is skipped when its output");
-    Console.Error.WriteLine("file exists. Translation needs ANTHROPIC_API_KEY.");
+    Console.Error.WriteLine("using the Subtitle Edit settings. A video with <video>.en.vtt, .en.srt or");
+    Console.Error.WriteLine(".de.vtt next to it has that translated instead. A step is skipped when its");
+    Console.Error.WriteLine("output file exists. Translation needs ANTHROPIC_API_KEY.");
     Console.Error.WriteLine();
     Console.Error.WriteLine("Folders are searched recursively, also for download.txt: a URL per line,");
     Console.Error.WriteLine("optionally followed by the file name, downloaded into its folder first");

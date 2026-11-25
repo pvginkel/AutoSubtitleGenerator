@@ -10,8 +10,10 @@ Subtitle Edit, with the same engines, models and settings:
 | 3 | Translate > Auto-translate (Anthropic Claude), German to Dutch | `<video>.nl.srt` |
 
 A video that comes with subtitles, `<video>.en.vtt` or `<video>.de.vtt` (as yt-dlp writes them,
-see [Downloads](#downloads)), has those translated to `<video>.nl.srt` instead: steps 1 and 2 are
-not needed. English is taken over German, and a `<video>.nl.vtt` needs no translation at all.
+see [Downloads](#downloads)) or `<video>.en.srt`, has those translated to `<video>.nl.srt`
+instead: steps 1 and 2 are not needed. English is taken over German, and WebVTT over SubRip; a
+`<video>.nl.vtt` or `<video>.nl.srt` needs no translation at all. A `<video>.de.srt` is taken as
+the output of step 1, so it is aligned before it is translated.
 
 A step is skipped when its output file already exists. Each output is written to a temporary file
 and renamed when complete, so an interrupted run never leaves a half-written file behind.
@@ -22,6 +24,16 @@ The engines only do part of the work: Subtitle Edit post-processes Whisper's out
 the alignment into batches with its own retiming rules, and merges/splits lines around the
 translation calls. To get the same results, this app references Subtitle Edit's own projects and
 calls that code directly, re-implementing only what the dialogs do around it.
+
+Translation is the exception. Subtitle Edit's Anthropic engine sends its prompt and the text as
+one message and takes the whole reply as the translation, so when Claude corrected itself in the
+reply ("Wait, I need to correct the first line"), that ended up in the subtitles. This app calls
+Claude itself (`ClaudeTranslator.cs`): it sends the subtitles in numbered batches of up to 30, with
+the ones just before and after as context, and a JSON schema holds the reply to one translation
+per subtitle. A subtitle that comes back untranslated is asked for again; one that Claude refuses
+to translate is kept in the original language, with an error in the output. A subtitle with a
+line over the maximum line length (Options > Settings > Rules) is broken again as the "Auto br"
+button does it.
 
 It reads the settings, engines and models of the installed Subtitle Edit from
 `%APPDATA%\Subtitle Edit` and never writes to them. Change settings in Subtitle Edit itself; the

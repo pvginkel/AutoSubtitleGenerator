@@ -4,7 +4,7 @@ namespace AutoSubtitleGenerator;
 /// The three Subtitle Edit steps for one video, each skipped when its output exists. As in the
 /// GUI, a step works on what the previous step left in memory, or on the saved file when that
 /// step was skipped. A video that came with subtitles (<c>&lt;video&gt;.&lt;language&gt;.vtt</c>, as
-/// yt-dlp writes them) has those translated instead.
+/// yt-dlp writes them, or <c>.srt</c>) has those translated instead.
 /// </summary>
 internal static class Pipeline
 {
@@ -21,10 +21,10 @@ internal static class Pipeline
         var alignedFileName = $"{baseName} (aligned).{SourceLanguage}.srt";
         var translatedFileName = $"{baseName}.{TargetLanguage}.srt";
 
-        var subtitleLanguage = SubtitleLanguages.FirstOrDefault(language => File.Exists($"{baseName}.{language}.vtt"));
-        if (subtitleLanguage != null)
+        var supplied = SuppliedSubtitles(baseName).FirstOrDefault(s => File.Exists(s.FileName));
+        if (supplied != default)
         {
-            await TranslateSubtitleAsync($"{baseName}.{subtitleLanguage}.vtt", subtitleLanguage, translatedFileName, cancellationToken);
+            await TranslateSubtitleAsync(supplied.FileName, supplied.Language, translatedFileName, cancellationToken);
             return;
         }
 
@@ -70,12 +70,26 @@ internal static class Pipeline
         }
     }
 
+    /// <summary>
+    /// The subtitle files a video may come with, in order of preference: by language, then WebVTT
+    /// before SubRip. <c>&lt;video&gt;.de.srt</c> is not one of them: it is what speech to text
+    /// writes, so a German SubRip file is aligned before it is translated. <c>&lt;video&gt;.nl.srt</c>,
+    /// the translation, is: when it exists there is nothing to do.
+    /// </summary>
+    private static IEnumerable<(string FileName, string Language)> SuppliedSubtitles(string baseName) =>
+        from language in SubtitleLanguages
+        from extension in new[] { ".vtt", ".srt" }
+        where !(language == SourceLanguage && extension == ".srt")
+        select ($"{baseName}.{language}{extension}", language);
+
     /// <summary>File > Open of the subtitle that came with the video, Auto-translate, then Save as SubRip.</summary>
     private static async Task TranslateSubtitleAsync(string subtitleFileName, string languageCode, string translatedFileName, CancellationToken cancellationToken)
     {
         if (languageCode == TargetLanguage)
         {
-            Log.Step($"Subtitles: {Path.GetFileName(subtitleFileName)} is already in the target language, nothing to do");
+            Log.Step(subtitleFileName == translatedFileName
+                ? $"Subtitles: {Path.GetFileName(subtitleFileName)} exists, nothing to do"
+                : $"Subtitles: {Path.GetFileName(subtitleFileName)} is already in the target language, nothing to do");
             return;
         }
 
