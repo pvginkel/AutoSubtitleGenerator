@@ -19,35 +19,28 @@ if (args.Length == 0)
     Console.Error.WriteLine("Usage: AutoSubtitleGenerator <video file or folder>...");
     Console.Error.WriteLine();
     Console.Error.WriteLine("For every video: speech to text (<video>.de.srt), improve time codes");
-    Console.Error.WriteLine("(<video> (aligned).de.srt) and DeepL translation (<video>.nl.srt), using");
-    Console.Error.WriteLine("the Subtitle Edit settings. Folders are searched recursively. A step is");
-    Console.Error.WriteLine("skipped when its output file exists. DeepL needs DEEPL_API_KEY.");
+    Console.Error.WriteLine("(<video> (aligned).de.srt) and translation with Claude (<video>.nl.srt),");
+    Console.Error.WriteLine("using the Subtitle Edit settings. A video with <video>.en.vtt or .de.vtt");
+    Console.Error.WriteLine("next to it has that translated instead. A step is skipped when its output");
+    Console.Error.WriteLine("file exists. Translation needs ANTHROPIC_API_KEY.");
+    Console.Error.WriteLine();
+    Console.Error.WriteLine("Folders are searched recursively, also for download.txt: a URL per line,");
+    Console.Error.WriteLine("optionally followed by the file name, downloaded into its folder first");
+    Console.Error.WriteLine("(.m3u8 with yt-dlp). Done lines get \"# \" in front and are skipped.");
     return 1;
 }
 
-var videoFileNames = new List<string>();
+var paths = new List<string>();
 foreach (var arg in args)
 {
     var path = Path.GetFullPath(arg);
-    if (Directory.Exists(path))
-    {
-        videoFileNames.AddRange(VideoFiles.Find(path));
-    }
-    else if (File.Exists(path))
-    {
-        videoFileNames.Add(path);
-    }
-    else
+    if (!Directory.Exists(path) && !File.Exists(path))
     {
         Log.Error("Not found: " + arg);
         return 1;
     }
-}
 
-if (videoFileNames.Count == 0)
-{
-    Log.Error("No video files found.");
-    return 1;
+    paths.Add(path);
 }
 
 // As Subtitle Edit's own startup and main window: code pages, the settings as the GUI left them
@@ -66,13 +59,43 @@ Console.CancelKeyPress += (_, e) =>
     cancellation.Cancel();
 };
 
+// Downloads first, so what they bring is found as videos below.
+var failedDownloads = new List<string>();
+var listFileNames = paths.Where(Directory.Exists).SelectMany(Downloads.FindLists).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+foreach (var listFileName in listFileNames)
+{
+    Header(listFileName);
+    try
+    {
+        failedDownloads.AddRange(await Downloads.RunAsync(listFileName, cancellation.Token));
+    }
+    catch (OperationCanceledException)
+    {
+        Log.Error("Cancelled.");
+        return 1;
+    }
+    catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+    {
+        Log.Error(exception.Message);
+        failedDownloads.Add(listFileName);
+    }
+}
+
+var videoFileNames = paths
+    .SelectMany(path => Directory.Exists(path) ? VideoFiles.Find(path) : [path])
+    .Distinct(StringComparer.OrdinalIgnoreCase)
+    .ToList();
+
+if (videoFileNames.Count == 0 && failedDownloads.Count == 0)
+{
+    Log.Error("No video files found.");
+    return 1;
+}
+
 var failed = new List<string>();
 foreach (var videoFileName in videoFileNames)
 {
-    Console.WriteLine();
-    Console.ForegroundColor = ConsoleColor.Cyan;
-    Console.WriteLine("=== " + videoFileName);
-    Console.ResetColor();
+    Header(videoFileName);
 
     try
     {
@@ -97,14 +120,34 @@ foreach (var videoFileName in videoFileNames)
 }
 
 Console.WriteLine();
+if (failedDownloads.Count > 0)
+{
+    Console.ForegroundColor = ConsoleColor.Red;
+    Console.WriteLine($"Downloads failed ({failedDownloads.Count}):");
+    failedDownloads.ForEach(f => Console.WriteLine("  " + f));
+    Console.ResetColor();
+}
+
 if (failed.Count > 0)
 {
     Console.ForegroundColor = ConsoleColor.Red;
     Console.WriteLine($"Failed ({failed.Count} of {videoFileNames.Count}):");
     failed.ForEach(f => Console.WriteLine("  " + f));
     Console.ResetColor();
+}
+
+if (failedDownloads.Count > 0 || failed.Count > 0)
+{
     return 1;
 }
 
 Console.WriteLine($"Done ({videoFileNames.Count} video(s)).");
 return 0;
+
+static void Header(string text)
+{
+    Console.WriteLine();
+    Console.ForegroundColor = ConsoleColor.Cyan;
+    Console.WriteLine("=== " + text);
+    Console.ResetColor();
+}

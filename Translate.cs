@@ -6,41 +6,48 @@ using Nikse.SubtitleEdit.UiLogic.Translate;
 namespace AutoSubtitleGenerator;
 
 /// <summary>
-/// Translate > Auto-translate with DeepL, then OK: AutoTranslateViewModel's translate loop is
-/// the same as libuilogic's DoAutoTranslate, which is used here as is.
+/// Translate > Auto-translate with Anthropic Claude, then OK: AutoTranslateViewModel's translate
+/// loop is the same as libuilogic's DoAutoTranslate, which is used here as is.
 /// </summary>
 internal static class Translate
 {
     public static async Task<Subtitle> RunAsync(Subtitle subtitle, string sourceLanguageCode, string targetLanguageCode, CancellationToken cancellationToken)
     {
-        var apiKey = Environment.GetEnvironmentVariable("DEEPL_API_KEY");
+        var apiKey = Environment.GetEnvironmentVariable("ANTHROPIC_API_KEY");
         if (string.IsNullOrWhiteSpace(apiKey))
         {
-            throw new InvalidOperationException("Set the DEEPL_API_KEY environment variable to your DeepL API key.");
+            throw new InvalidOperationException("Set the ANTHROPIC_API_KEY environment variable to your Anthropic API key.");
         }
 
-        // AutoTranslateViewModel.SaveSettings puts the dialog's values here; the URL and formality
-        // come from Subtitle Edit's settings, the key from the environment.
+        // AutoTranslateViewModel.LoadSettings and SaveSettings put the dialog's values here; the
+        // model, URL and prompt come from Subtitle Edit's settings, the key from the environment.
+        var settings = Se.Settings.AutoTranslate;
         var tools = Configuration.Settings.Tools;
-        tools.AutoTranslateDeepLUrl = Se.Settings.AutoTranslate.DeepLUrl.Trim();
-        tools.AutoTranslateDeepLApiKey = apiKey.Trim();
-        tools.AutoTranslateDeepLFormality = Se.Settings.AutoTranslate.DeepLFormality;
+        tools.AnthropicApiKey = apiKey.Trim();
+        tools.AnthropicApiModel = settings.AnthropicApiModel?.Trim() ?? string.Empty;
+        tools.AnthropicApiUrl = settings.AnthropicApiUrl?.Trim() ?? string.Empty;
+        tools.AnthropicPrompt = settings.AnthropicPrompt;
 
-        var translator = new DeepLTranslate();
-        var source = translator.GetSupportedSourceLanguages().First(p => p.Code == sourceLanguageCode);
-        var target = translator.GetSupportedTargetLanguages().First(p => p.Code == targetLanguageCode);
-        Log.Info($"Engine: {translator.Name}, {source.Name} to {target.Name}, formality {tools.AutoTranslateDeepLFormality}");
+        using var translator = new AnthropicTranslate();
+        var source = translator.GetSupportedSourceLanguages().First(p => p.TwoLetterIsoLanguageName == sourceLanguageCode);
+        var target = translator.GetSupportedTargetLanguages().First(p => p.TwoLetterIsoLanguageName == targetLanguageCode);
+
+        // The engine falls back to its first model when none is set.
+        var model = string.IsNullOrEmpty(tools.AnthropicApiModel) ? AnthropicTranslate.Models[0] : tools.AnthropicApiModel;
+        Log.Info($"Engine: {translator.Name}, model {model}, {source.Name} to {target.Name}");
 
         // As in a freshly started Subtitle Edit: no merge/split trouble remembered from an earlier file.
         MergeAndSplitHelper.MergeSplitProblems = false;
 
         var autoTranslate = new DoAutoTranslate
         {
-            TranslateEachLineSeparately = Se.Settings.AutoTranslate.IsTranslateEachLineSeparately(translator.Name),
+            TranslateEachLineSeparately = settings.IsTranslateEachLineSeparately(translator.Name),
+            Progress = (done, total) => Log.Progress($"Translating line {done} of {total}"),
         };
         Log.Progress($"Translating {subtitle.Paragraphs.Count} lines");
         var rows = await autoTranslate.DoTranslate(subtitle, source, target, translator, cancellationToken);
         Log.EndProgress();
+        cancellationToken.ThrowIfCancellationRequested();
 
         // MainViewModel, on OK: a row takes its translation when there is one; time codes stay.
         var translated = new Subtitle(subtitle);

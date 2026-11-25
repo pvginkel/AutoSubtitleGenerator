@@ -20,9 +20,9 @@ internal static class SubtitleFile
     {
         var encoding = LanguageAutoDetect.GetEncodingFromFile(fileName);
         var subtitle = Subtitle.Parse(fileName, encoding);
-        if (subtitle?.OriginalFormat is not SubRip || subtitle.Paragraphs.Count == 0)
+        if (subtitle?.OriginalFormat is not (SubRip or WebVTT or WebVTTFileWithLineNumber) || subtitle.Paragraphs.Count == 0)
         {
-            throw new InvalidOperationException("Not a SubRip subtitle: " + fileName);
+            throw new InvalidOperationException("Not a SubRip or WebVTT subtitle: " + fileName);
         }
 
         if (encoding.CodePage == Encoding.UTF8.CodePage)
